@@ -20,12 +20,12 @@ async function request(app: Express, path: string) {
   return { status: res.status, body: data };
 }
 
-function insertRequest(createdAt: string) {
+function insertRequest(createdAt: string, gatewayApiKeyId: number | null = null, status = 'success') {
   const db = getDb();
   db.prepare(`
-    INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, latency_ms, error, created_at)
-    VALUES ('test', 'test-model', 'success', 1, 2, 3, NULL, ?)
-  `).run(createdAt);
+    INSERT INTO requests (platform, model_id, gateway_api_key_id, status, input_tokens, output_tokens, latency_ms, error, created_at)
+    VALUES ('test', 'test-model', ?, ?, 1, 2, 3, ?, ?)
+  `).run(gatewayApiKeyId, status, status === 'error' ? 'boom' : null, createdAt);
 }
 
 describe('Analytics API', () => {
@@ -73,5 +73,62 @@ describe('Analytics API', () => {
 
     expect(status).toBe(200);
     expect(body.totalRequests).toBe(2);
+  });
+
+  it('filters summary analytics by gateway API key', async () => {
+    insertRequest('2026-05-29 10:00:00', 1);
+    insertRequest('2026-05-29 10:01:00', 2);
+    insertRequest('2026-05-29 10:02:00', 2);
+
+    const all = await request(app, '/api/analytics/summary?range=24h');
+    const filtered = await request(app, '/api/analytics/summary?range=24h&gatewayApiKeyId=2');
+
+    expect(all.body.totalRequests).toBe(3);
+    expect(filtered.status).toBe(200);
+    expect(filtered.body.totalRequests).toBe(2);
+    expect(filtered.body.totalInputTokens).toBe(2);
+  });
+
+  it('treats legacy NULL gateway attribution as gateway key id 1', async () => {
+    insertRequest('2026-05-29 10:00:00', null);
+    insertRequest('2026-05-29 10:01:00', 1);
+    insertRequest('2026-05-29 10:02:00', 2);
+
+    const filtered = await request(app, '/api/analytics/summary?range=24h&gatewayApiKeyId=1');
+
+    expect(filtered.status).toBe(200);
+    expect(filtered.body.totalRequests).toBe(2);
+  });
+
+  it.each([
+    ['by-platform', '/api/analytics/by-platform?range=24h&gatewayApiKeyId=2'],
+    ['timeline', '/api/analytics/timeline?range=24h&gatewayApiKeyId=2'],
+    ['by-model', '/api/analytics/by-model?range=24h&gatewayApiKeyId=2'],
+    ['errors', '/api/analytics/errors?range=24h&gatewayApiKeyId=2'],
+    ['error-distribution', '/api/analytics/error-distribution?range=24h&gatewayApiKeyId=2'],
+  ])('applies gateway filtering to %s', async (endpoint, path) => {
+    insertRequest('2026-05-29 10:00:00', 1, 'error');
+    insertRequest('2026-05-29 10:01:00', 2, 'error');
+
+    const { status, body } = await request(app, path);
+
+    expect(status).toBe(200);
+    if (endpoint === 'error-distribution') {
+      expect(body.byCategory[0].count).toBe(1);
+      expect(body.byPlatform[0].count).toBe(1);
+      expect(body.detailed[0].count).toBe(1);
+    } else if (endpoint === 'errors') {
+      expect(body).toHaveLength(1);
+    } else {
+      expect(body).toHaveLength(1);
+      expect(body[0].requests).toBe(1);
+    }
+  });
+
+  it('rejects invalid gatewayApiKeyId values', async () => {
+    const { status, body } = await request(app, '/api/analytics/summary?range=24h&gatewayApiKeyId=abc');
+
+    expect(status).toBe(400);
+    expect(body.error.message).toContain('gatewayApiKeyId');
   });
 });

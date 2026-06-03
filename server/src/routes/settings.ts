@@ -1,16 +1,25 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
-import { getUnifiedApiKey, regenerateUnifiedKey } from '../db/index.js';
 
 export const settingsRouter = Router();
 
-// Get the unified API key
+// Legacy endpoint kept only so older dashboard bundles receive a clear message.
+// Gateway keys are now managed through /api/gateway-keys and raw keys are shown
+// only immediately after create/regenerate.
 settingsRouter.get('/api-key', (_req: Request, res: Response) => {
-  res.json({ apiKey: getUnifiedApiKey() });
+  res.status(410).json({
+    error: {
+      message: 'Unified API key settings were replaced by gateway API keys. Use /api/gateway-keys.',
+      type: 'gone',
+    },
+  });
 });
 
-// Regenerate the unified API key
 settingsRouter.post('/api-key/regenerate', (_req: Request, res: Response) => {
-  const newKey = regenerateUnifiedKey();
-  res.json({ apiKey: newKey });
+  res.status(410).json({
+    error: {
+      message: 'Unified API key regeneration was replaced by gateway API key regeneration. Use /api/gateway-keys/:id/regenerate.',
+      type: 'gone',
+    },
+  });
 });

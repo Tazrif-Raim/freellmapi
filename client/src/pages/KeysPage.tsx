@@ -6,9 +6,11 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { Badge } from '@/components/ui/badge'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { PageHeader } from '@/components/page-header'
-import type { ApiKey, Platform } from '../../../shared/types'
-import { Pencil, ExternalLink } from 'lucide-react'
+import type { ApiKey, CreateGatewayApiKeyResponse, GatewayApiKey, Platform } from '../../../shared/types'
+import { Check, Copy, ExternalLink, Pencil, RefreshCw, Trash2, X } from 'lucide-react'
 import { formatSqliteUtcToLocalTime } from '@/lib/utils'
 
 // Small "Get API key" external link shown next to a provider (#137).
@@ -61,6 +63,8 @@ const CUSTOM_GROUP: { value: Platform; label: string; url: string } = {
   url: '',
 }
 
+const PLAYGROUND_GATEWAY_KEY_STORAGE = 'freellmapi_playground_gateway_key'
+
 const statusDot: Record<string, string> = {
   healthy: 'bg-emerald-500',
   rate_limited: 'bg-amber-500',
@@ -94,48 +98,102 @@ interface HealthData {
 
 function UnifiedKeySection() {
   const queryClient = useQueryClient()
-  const [showKey, setShowKey] = useState(false)
-  const [copied, setCopied] = useState(false)
+  const [label, setLabel] = useState('')
+  const [createdKey, setCreatedKey] = useState<CreateGatewayApiKeyResponse | null>(null)
+  const [copiedId, setCopiedId] = useState<number | null>(null)
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editingLabel, setEditingLabel] = useState('')
+  const [confirmAction, setConfirmAction] = useState<{ type: 'delete' | 'regenerate'; id: number } | null>(null)
 
-  const { data, isError } = useQuery<{ apiKey: string }>({
-    queryKey: ['unified-key'],
-    queryFn: () => apiFetch('/api/settings/api-key'),
+  const { data: gatewayKeys = [], isLoading, isError } = useQuery<GatewayApiKey[]>({
+    queryKey: ['gateway-keys'],
+    queryFn: () => apiFetch('/api/gateway-keys'),
   })
 
-  const regenerate = useMutation({
-    mutationFn: () => apiFetch('/api/settings/api-key/regenerate', { method: 'POST' }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['unified-key'] }),
+  const createKey = useMutation({
+    mutationFn: (body: { label?: string }) =>
+      apiFetch<CreateGatewayApiKeyResponse>('/api/gateway-keys', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    onSuccess: (key) => {
+      setCreatedKey(key)
+      setLabel('')
+      sessionStorage.setItem(PLAYGROUND_GATEWAY_KEY_STORAGE, key.key)
+      queryClient.invalidateQueries({ queryKey: ['gateway-keys'] })
+      queryClient.invalidateQueries({ queryKey: ['analytics-gateway-keys'] })
+    },
   })
 
-  const apiKey = data?.apiKey ?? ''
-  const masked = apiKey ? apiKey.slice(0, 13) + '•'.repeat(32) : '…'
+  const updateGatewayKey = useMutation({
+    mutationFn: ({ id, ...body }: { id: number; label?: string; enabled?: boolean }) =>
+      apiFetch<GatewayApiKey>(`/api/gateway-keys/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }),
+    onSuccess: () => {
+      setEditingId(null)
+      setEditingLabel('')
+      queryClient.invalidateQueries({ queryKey: ['gateway-keys'] })
+      queryClient.invalidateQueries({ queryKey: ['analytics-gateway-keys'] })
+    },
+  })
+
+  const deleteGatewayKey = useMutation({
+    mutationFn: (id: number) => apiFetch(`/api/gateway-keys/${id}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      setConfirmAction(null)
+      queryClient.invalidateQueries({ queryKey: ['gateway-keys'] })
+      queryClient.invalidateQueries({ queryKey: ['analytics-gateway-keys'] })
+    },
+  })
+
+  const regenerateGatewayKey = useMutation({
+    mutationFn: (id: number) =>
+      apiFetch<CreateGatewayApiKeyResponse>(`/api/gateway-keys/${id}/regenerate`, { method: 'POST' }),
+    onSuccess: (key) => {
+      setCreatedKey(key)
+      setConfirmAction(null)
+      sessionStorage.setItem(PLAYGROUND_GATEWAY_KEY_STORAGE, key.key)
+      queryClient.invalidateQueries({ queryKey: ['gateway-keys'] })
+      queryClient.invalidateQueries({ queryKey: ['analytics-gateway-keys'] })
+    },
+  })
+
   const baseUrl = import.meta.env.DEV
     ? `http://${window.location.hostname}:${__SERVER_PORT__}/v1`
     : `${window.location.origin}/v1`
+  const activeGatewayKeyCount = gatewayKeys.filter(key => key.enabled).length
 
-  function copy() {
-    navigator.clipboard.writeText(apiKey)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1500)
+  function copyRawGatewayKey(key: CreateGatewayApiKeyResponse) {
+    navigator.clipboard.writeText(key.key)
+    setCopiedId(key.id)
+    setTimeout(() => setCopiedId(null), 1500)
+  }
+
+  function submitGatewayKey(event: React.FormEvent) {
+    event.preventDefault()
+    createKey.mutate({ label: label.trim() || undefined })
+  }
+
+  function startGatewayKeyEditing(key: GatewayApiKey) {
+    setEditingId(key.id)
+    setEditingLabel(key.label)
+  }
+
+  function saveGatewayKeyLabel(id: number) {
+    updateGatewayKey.mutate({ id, label: editingLabel })
   }
 
   return (
-    <section className="rounded-lg border bg-card p-5">
+    <section>
       <div className="flex items-start justify-between gap-4 mb-3">
         <div>
-          <h2 className="text-sm font-medium">Your unified API key</h2>
+          <h2 className="text-sm font-medium">Gateway API keys</h2>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Use this as your OpenAI <code className="font-mono">api_key</code>; it authenticates requests to this proxy.
+            Keys your apps use to call this gateway. Provider keys below are only for upstream LLM providers.
           </p>
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => regenerate.mutate()}
-          disabled={regenerate.isPending || isError}
-        >
-          Regenerate
-        </Button>
       </div>
 
       {isError ? (
@@ -145,17 +203,166 @@ function UnifiedKeySection() {
           under the <code className="font-mono">server</code> prefix.
         </div>
       ) : (
-        <div className="flex items-center gap-2">
-          <code className="flex-1 font-mono text-xs bg-muted px-3 py-2 rounded-md select-all truncate tabular-nums">
-            {showKey ? apiKey : masked}
-          </code>
-          <Button variant="outline" size="sm" onClick={() => setShowKey(!showKey)}>
-            {showKey ? 'Hide' : 'Show'}
-          </Button>
-          <Button variant="outline" size="sm" onClick={copy}>
-            {copied ? 'Copied' : 'Copy'}
-          </Button>
-        </div>
+        <>
+          <form onSubmit={submitGatewayKey} className="mb-3 flex flex-wrap items-end gap-3 rounded-lg border bg-card p-4">
+            <div className="space-y-1.5 flex-1 min-w-[220px]">
+              <Label className="text-xs">Label</Label>
+              <Input
+                value={label}
+                onChange={e => setLabel(e.target.value)}
+                placeholder="optional, e.g. mobile app"
+                maxLength={120}
+              />
+            </div>
+            <Button type="submit" size="sm" disabled={createKey.isPending}>
+              {createKey.isPending ? 'Creating…' : 'Create gateway key'}
+            </Button>
+          </form>
+
+          {createdKey && (
+            <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+              <div className="mb-2 flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium">Copy this key now. It will not be shown again.</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Use it as your OpenAI-compatible <code className="font-mono">api_key</code>.
+                  </p>
+                </div>
+                <Button variant="outline" size="sm" onClick={() => copyRawGatewayKey(createdKey)}>
+                  <Copy className="size-3.5" />
+                  {copiedId === createdKey.id ? 'Copied' : 'Copy'}
+                </Button>
+              </div>
+              <code className="block rounded-md bg-background px-3 py-2 text-xs font-mono tabular-nums break-all">
+                {createdKey.key}
+              </code>
+            </div>
+          )}
+
+          <div className="rounded-lg border bg-card overflow-hidden">
+            {isLoading ? (
+              <p className="p-4 text-sm text-muted-foreground">Loading…</p>
+            ) : gatewayKeys.length === 0 ? (
+              <div className="p-8 text-center">
+                <p className="text-sm text-muted-foreground">
+                  No gateway keys yet. Create one to let clients call this gateway.
+                </p>
+              </div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="pl-4">Label</TableHead>
+                    <TableHead>Key preview</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Created</TableHead>
+                    <TableHead>Last used</TableHead>
+                    <TableHead className="text-right pr-4">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {gatewayKeys.map(key => {
+                    const isEditingGatewayKey = editingId === key.id
+                    const isConfirmingDelete = confirmAction?.type === 'delete' && confirmAction.id === key.id
+                    const isConfirmingRegenerate = confirmAction?.type === 'regenerate' && confirmAction.id === key.id
+                    const isLastActive = key.enabled && activeGatewayKeyCount <= 1
+                    return (
+                      <TableRow key={key.id}>
+                        <TableCell className="pl-4">
+                          {isEditingGatewayKey ? (
+                            <div className="flex items-center gap-1">
+                              <Input
+                                value={editingLabel}
+                                onChange={e => setEditingLabel(e.target.value)}
+                                onKeyDown={e => {
+                                  if (e.key === 'Enter') saveGatewayKeyLabel(key.id)
+                                  if (e.key === 'Escape') setEditingId(null)
+                                }}
+                                className="h-7 w-[180px] text-xs"
+                                maxLength={120}
+                                autoFocus
+                              />
+                              <Button variant="ghost" size="icon-xs" onClick={() => saveGatewayKeyLabel(key.id)} disabled={updateGatewayKey.isPending}>
+                                <Check />
+                              </Button>
+                              <Button variant="ghost" size="icon-xs" onClick={() => setEditingId(null)}>
+                                <X />
+                              </Button>
+                            </div>
+                          ) : (
+                            <span className="text-sm">{key.label || 'Untitled'}</span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <code className="font-mono text-xs tabular-nums">{key.keyPreview}</code>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={key.enabled ? 'secondary' : 'outline'}>
+                            {key.enabled ? 'Enabled' : 'Disabled'}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground tabular-nums">
+                          {formatSqliteUtcToLocalTime(key.createdAt, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground tabular-nums">
+                          {formatSqliteUtcToLocalTime(key.lastUsedAt, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                        </TableCell>
+                        <TableCell className="pr-4">
+                          <div className="flex items-center justify-end gap-1">
+                            <Switch
+                              checked={key.enabled}
+                              disabled={updateGatewayKey.isPending || isLastActive}
+                              onCheckedChange={(enabled) => updateGatewayKey.mutate({ id: key.id, enabled })}
+                            />
+                            {!isEditingGatewayKey && (
+                              <Button variant="ghost" size="icon-xs" onClick={() => startGatewayKeyEditing(key)}>
+                                <Pencil />
+                              </Button>
+                            )}
+                            {isConfirmingRegenerate ? (
+                              <>
+                                <Button variant="destructive" size="xs" onClick={() => regenerateGatewayKey.mutate(key.id)} disabled={regenerateGatewayKey.isPending}>
+                                  Confirm
+                                </Button>
+                                <Button variant="ghost" size="icon-xs" onClick={() => setConfirmAction(null)}>
+                                  <X />
+                                </Button>
+                              </>
+                            ) : (
+                              <Button variant="ghost" size="icon-xs" onClick={() => setConfirmAction({ type: 'regenerate', id: key.id })}>
+                                <RefreshCw />
+                              </Button>
+                            )}
+                            {isConfirmingDelete ? (
+                              <>
+                                <Button variant="destructive" size="xs" onClick={() => deleteGatewayKey.mutate(key.id)} disabled={deleteGatewayKey.isPending || isLastActive}>
+                                  Revoke
+                                </Button>
+                                <Button variant="ghost" size="icon-xs" onClick={() => setConfirmAction(null)}>
+                                  <X />
+                                </Button>
+                              </>
+                            ) : (
+                              <Button
+                                variant="ghost"
+                                size="icon-xs"
+                                className="text-muted-foreground hover:text-destructive"
+                                disabled={isLastActive}
+                                onClick={() => setConfirmAction({ type: 'delete', id: key.id })}
+                              >
+                                <Trash2 />
+                              </Button>
+                            )}
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )
+                  })}
+                </TableBody>
+              </Table>
+            )}
+          </div>
+        </>
       )}
 
       <div className="mt-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
@@ -383,7 +590,7 @@ export default function KeysPage() {
     <div>
       <PageHeader
         title="Keys"
-        description="Provider credentials and the unified API key your apps connect with."
+        description="Gateway client keys and upstream provider credentials."
         actions={
           keys.length > 0 && (
             <Button variant="outline" size="sm" onClick={() => checkAll.mutate()} disabled={checkAll.isPending}>

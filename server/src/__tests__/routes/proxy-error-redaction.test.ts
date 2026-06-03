@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
-import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import { initDb, getDb } from '../../db/index.js';
+import { createTestGatewayApiKey, mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 
 let dashToken = '';
+let gatewayKey = '';
 
 async function request(app: Express, method: string, path: string, body?: any, headers: Record<string, string> = {}) {
   const server = app.listen(0);
@@ -31,7 +32,7 @@ async function request(app: Express, method: string, path: string, body?: any, h
 }
 
 function authHeaders() {
-  return { Authorization: `Bearer ${getUnifiedApiKey()}` };
+  return { Authorization: `Bearer ${gatewayKey}` };
 }
 
 describe('Provider error redaction', () => {
@@ -42,6 +43,7 @@ describe('Provider error redaction', () => {
     initDb(':memory:');
     app = createApp();
     dashToken = mintDashboardToken();
+    gatewayKey = createTestGatewayApiKey();
   });
 
   beforeEach(async () => {

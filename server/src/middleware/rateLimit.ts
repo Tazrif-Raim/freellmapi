@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 
 // Per-IP fixed-window rate limiter for the public /v1 proxy (#35, item #6).
 //
-// The /v1 surface authenticates with the unified API key but has no password
+// The /v1 surface authenticates with gateway API keys but has no password
 // login like the dashboard does, so without this an attacker who can reach the
 // server could brute-force the key or flood upstream providers. This caps how
 // many requests a single client IP can make per minute and returns a standard

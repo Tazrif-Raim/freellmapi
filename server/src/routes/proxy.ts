@@ -6,9 +6,10 @@ import type { ChatMessage } from '@freellmapi/shared/types.js';
 import { routeRequest, recordRateLimitHit, recordSuccess, hasEnabledVisionModel, type RouteResult } from '../services/router.js';
 import { recordRequest, recordTokens, setCooldown, getCooldownDurationForLimit } from '../services/ratelimit.js';
 import { pruneRequestAnalytics } from '../services/request-retention.js';
-import { getDb, getUnifiedApiKey } from '../db/index.js';
+import { getDb } from '../db/index.js';
 import { contentToString, messageHasImage, normalizeOutboundContent } from '../lib/content.js';
 import { sanitizeProviderErrorMessage } from '../lib/error-redaction.js';
+import { hashGatewayApiKey } from '../lib/gateway-keys.js';
 
 export const proxyRouter = Router();
 
@@ -22,7 +23,7 @@ function isAutoModel(modelId: string | undefined): boolean {
   return modelId === AUTO_MODEL_ID;
 }
 
-// Constant-time string comparison for the unified API key. Plain `===` leaks
+// Legacy constant-time string comparison for old single-key auth tests/helpers. Plain `===` leaks
 // length and per-character timing, which a network attacker could in principle
 // use to recover the key one byte at a time.
 export function timingSafeStringEqual(provided: string, expected: string): boolean {
@@ -35,7 +36,7 @@ export function timingSafeStringEqual(provided: string, expected: string): boole
   return crypto.timingSafeEqual(compareA, b) && a.length === b.length;
 }
 
-// Extract the unified API key from an incoming request. Accepts both the
+// Extract a gateway API token from an incoming request. Accepts both the
 // OpenAI-style `Authorization: Bearer <key>` header and the Anthropic-style
 // `x-api-key` header. Clients that speak the Anthropic wire format — notably
 // Claude Code routed through CC Switch (#103) — send the key in `x-api-key`
@@ -49,6 +50,23 @@ export function extractApiToken(req: Request): string | undefined {
   const xApiKey = Array.isArray(apiKeyHeader) ? apiKeyHeader[0] : apiKeyHeader;
   const trimmed = xApiKey?.trim();
   return trimmed || undefined;
+}
+
+export function authenticateGatewayApiKey(req: Request): { id: number } | undefined {
+  const token = extractApiToken(req);
+  if (!token) return undefined;
+
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT id
+    FROM gateway_api_keys
+    WHERE key_hash = ? AND enabled = 1 AND is_deleted = 0
+  `).get(hashGatewayApiKey(token)) as { id: number } | undefined;
+
+  if (!row) return undefined;
+
+  db.prepare("UPDATE gateway_api_keys SET last_used_at = datetime('now') WHERE id = ?").run(row.id);
+  return row;
 }
 
 // Sticky sessions: track which model served each "session"
@@ -261,9 +279,8 @@ const EmbeddingsBody = z.object({
 });
 
 proxyRouter.post('/embeddings', async (req: Request, res: Response) => {
-  const token = extractApiToken(req);
-  const unifiedKey = getUnifiedApiKey();
-  if (!token || !timingSafeStringEqual(token, unifiedKey)) {
+  const gatewayApiKey = authenticateGatewayApiKey(req);
+  if (!gatewayApiKey) {
     res.status(401).json({ error: { message: 'Invalid API key', type: 'authentication_error' } });
     return;
   }
@@ -316,12 +333,11 @@ proxyRouter.post('/embeddings', async (req: Request, res: Response) => {
 proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   const start = Date.now();
 
-  // Authenticate with the unified API key for every proxy request, including
+  // Authenticate with a gateway API key for every proxy request, including
   // loopback callers. Browser pages can reach localhost, so socket locality is
   // not a reliable authorization boundary.
-  const token = extractApiToken(req);
-  const unifiedKey = getUnifiedApiKey();
-  if (!token || !timingSafeStringEqual(token, unifiedKey)) {
+  const gatewayApiKey = authenticateGatewayApiKey(req);
+  if (!gatewayApiKey) {
     res.status(401).json({
       error: { message: 'Invalid API key', type: 'authentication_error' },
     });
@@ -516,7 +532,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           recordTokens(route.platform, route.modelId, route.keyId, estimatedInputTokens + totalOutputTokens);
           recordSuccess(route.modelDbId);
           setStickyModel(messages, route.modelDbId);
-          logRequest(route.platform, route.modelId, route.keyId, 'success', estimatedInputTokens, totalOutputTokens, Date.now() - start, null, ttfbMs);
+          logRequest(route.platform, route.modelId, route.keyId, 'success', estimatedInputTokens, totalOutputTokens, Date.now() - start, null, ttfbMs, gatewayApiKey.id);
           return;
         } catch (streamErr: any) {
           if (streamStarted) {
@@ -528,7 +544,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
             const payload = { error: { message: `Provider error (${route.displayName}): stream interrupted`, type: 'stream_error' } };
             try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch { /* socket gone */ }
             try { res.write('data: [DONE]\n\n'); res.end(); } catch { /* socket gone */ }
-            logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, totalOutputTokens, Date.now() - start, sanitizeProviderErrorMessage(streamErr.message));
+            logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, totalOutputTokens, Date.now() - start, sanitizeProviderErrorMessage(streamErr.message), null, gatewayApiKey.id);
             return;
           }
           // Pre-stream error — bubble to outer retry/502 handler.
@@ -554,14 +570,14 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           route.platform, route.modelId, route.keyId, 'success',
           result.usage?.prompt_tokens ?? 0,
           result.usage?.completion_tokens ?? 0,
-          Date.now() - start, null,
+          Date.now() - start, null, null, gatewayApiKey.id,
         );
         return;
       }
     } catch (err: any) {
       const latency = Date.now() - start;
       const safeError = sanitizeProviderErrorMessage(err.message);
-      logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, latency, safeError);
+      logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, latency, safeError, null, gatewayApiKey.id);
 
       if (isRetryableError(err)) {
         // Put this model+key on cooldown and try the next one
@@ -612,13 +628,14 @@ export function logRequest(
   latencyMs: number,
   error: string | null,
   ttfbMs: number | null = null,
+  gatewayApiKeyId: number | null = null,
 ) {
   try {
     const db = getDb();
     db.prepare(`
-      INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(platform, modelId, keyId, status, inputTokens, outputTokens, latencyMs, error, ttfbMs);
+      INSERT INTO requests (platform, model_id, key_id, gateway_api_key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(platform, modelId, keyId, gatewayApiKeyId, status, inputTokens, outputTokens, latencyMs, error, ttfbMs);
     pruneRequestAnalytics({ db });
   } catch (e) {
     console.error('Failed to log request:', e);

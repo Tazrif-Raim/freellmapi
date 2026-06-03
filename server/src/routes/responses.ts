@@ -10,12 +10,10 @@ import type {
 } from '@freellmapi/shared/types.js';
 import { routeRequest, recordRateLimitHit, recordSuccess, type RouteResult } from '../services/router.js';
 import { recordRequest, recordTokens, setCooldown, getCooldownDurationForLimit } from '../services/ratelimit.js';
-import { getUnifiedApiKey } from '../db/index.js';
 import { contentToString } from '../lib/content.js';
 import {
   isRetryableError,
-  timingSafeStringEqual,
-  extractApiToken,
+  authenticateGatewayApiKey,
   getStickyModel,
   setStickyModel,
   logRequest,
@@ -248,10 +246,9 @@ export function buildResponseObject(opts: {
 responsesRouter.post('/responses', async (req: Request, res: Response) => {
   const start = Date.now();
 
-  // Same unified-key auth as the proxy (accepts Bearer or x-api-key).
-  const token = extractApiToken(req);
-  const unifiedKey = getUnifiedApiKey();
-  if (!token || !timingSafeStringEqual(token, unifiedKey)) {
+  // Same gateway-key auth as the proxy (accepts Bearer or x-api-key).
+  const gatewayApiKey = authenticateGatewayApiKey(req);
+  if (!gatewayApiKey) {
     res.status(401).json({ error: { message: 'Invalid API key', type: 'authentication_error' } });
     return;
   }
@@ -440,7 +437,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
         recordTokens(route.platform, route.modelId, route.keyId, estimatedInputTokens + totalOutputTokens);
         recordSuccess(route.modelDbId);
         setStickyModel(messages, route.modelDbId);
-        logRequest(route.platform, route.modelId, route.keyId, 'success', estimatedInputTokens, totalOutputTokens, Date.now() - start, null);
+        logRequest(route.platform, route.modelId, route.keyId, 'success', estimatedInputTokens, totalOutputTokens, Date.now() - start, null, null, gatewayApiKey.id);
         return;
       } else {
         const result = await route.provider.chatCompletion(route.apiKey, messages, route.modelId, completionOpts);
@@ -463,12 +460,12 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
         }));
 
         logRequest(route.platform, route.modelId, route.keyId, 'success',
-          promptTokens, completionTokens, Date.now() - start, null);
+          promptTokens, completionTokens, Date.now() - start, null, null, gatewayApiKey.id);
         return;
       }
     } catch (err: any) {
       const latency = Date.now() - start;
-      logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, latency, err.message);
+      logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, latency, err.message, null, gatewayApiKey.id);
 
       // Mid-stream failures can't be retried (bytes already sent) — close cleanly.
       if (stream && streamStarted) {

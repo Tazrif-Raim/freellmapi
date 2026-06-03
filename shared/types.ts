@@ -66,6 +66,20 @@ export interface ApiKeyCreate {
   label?: string;
 }
 
+export interface GatewayApiKey {
+  id: number;
+  label: string;
+  keyPreview: string;
+  enabled: boolean;
+  isDeleted: boolean;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+export interface CreateGatewayApiKeyResponse extends GatewayApiKey {
+  key: string;
+}
+
 // ---- Fallback Config ----
 
 export interface FallbackEntry {

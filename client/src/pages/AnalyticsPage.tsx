@@ -6,11 +6,39 @@ import {
 } from 'recharts'
 import { apiFetch } from '@/lib/api'
 import { Button } from '@/components/ui/button'
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { PageHeader } from '@/components/page-header'
 import { formatSqliteUtcToLocalTime } from '@/lib/utils'
+import type { AnalyticsSummary, GatewayApiKey, PlatformStats, TimelinePoint } from '../../../shared/types'
 
 type TimeRange = '24h' | '7d' | '30d'
+
+interface ModelStats {
+  platform: string
+  modelId: string
+  displayName: string
+  requests: number
+  successRate: number
+  avgLatencyMs: number
+  totalInputTokens: number
+  totalOutputTokens: number
+}
+
+interface AnalyticsError {
+  id: number
+  platform: string
+  modelId: string
+  error: string
+  latencyMs: number
+  createdAt: string
+}
+
+interface ErrorDistribution {
+  byCategory: { category: string; count: number }[]
+  byPlatform: { platform: string; count: number }[]
+  detailed: { platform: string; model_id: string; error_category: string; count: number }[]
+}
 
 function formatTokens(n?: number): string {
   if (!n) return '0'
@@ -45,36 +73,61 @@ const primaryFill = 'var(--foreground)'
 
 export default function AnalyticsPage() {
   const [range, setRange] = useState<TimeRange>('7d')
+  const [gatewayApiKeyId, setGatewayApiKeyId] = useState<string>('all')
+
+  const analyticsPath = (path: string) => {
+    const params = new URLSearchParams({ range })
+    if (gatewayApiKeyId !== 'all') params.set('gatewayApiKeyId', gatewayApiKeyId)
+    return `/api/analytics/${path}?${params.toString()}`
+  }
+
+  const { data: gatewayKeys = [] } = useQuery<GatewayApiKey[]>({
+    queryKey: ['analytics-gateway-keys'],
+    queryFn: () => apiFetch('/api/gateway-keys?includeDeleted=true'),
+  })
 
   const { data: summary } = useQuery({
-    queryKey: ['analytics', 'summary', range],
-    queryFn: () => apiFetch<any>(`/api/analytics/summary?range=${range}`),
+    queryKey: ['analytics', 'summary', range, gatewayApiKeyId],
+    queryFn: () => apiFetch<AnalyticsSummary>(analyticsPath('summary')),
   })
 
   const { data: byPlatform = [] } = useQuery({
-    queryKey: ['analytics', 'by-platform', range],
-    queryFn: () => apiFetch<any[]>(`/api/analytics/by-platform?range=${range}`),
+    queryKey: ['analytics', 'by-platform', range, gatewayApiKeyId],
+    queryFn: () => apiFetch<PlatformStats[]>(analyticsPath('by-platform')),
   })
 
   const { data: timeline = [] } = useQuery({
-    queryKey: ['analytics', 'timeline', range],
-    queryFn: () => apiFetch<any[]>(`/api/analytics/timeline?range=${range}`),
+    queryKey: ['analytics', 'timeline', range, gatewayApiKeyId],
+    queryFn: () => apiFetch<TimelinePoint[]>(analyticsPath('timeline')),
   })
 
   const { data: byModel = [] } = useQuery({
-    queryKey: ['analytics', 'by-model', range],
-    queryFn: () => apiFetch<any[]>(`/api/analytics/by-model?range=${range}`),
+    queryKey: ['analytics', 'by-model', range, gatewayApiKeyId],
+    queryFn: () => apiFetch<ModelStats[]>(analyticsPath('by-model')),
   })
 
   const { data: errors = [] } = useQuery({
-    queryKey: ['analytics', 'errors', range],
-    queryFn: () => apiFetch<any[]>(`/api/analytics/errors?range=${range}`),
+    queryKey: ['analytics', 'errors', range, gatewayApiKeyId],
+    queryFn: () => apiFetch<AnalyticsError[]>(analyticsPath('errors')),
   })
 
   const { data: errorDist } = useQuery({
-    queryKey: ['analytics', 'error-distribution', range],
-    queryFn: () => apiFetch<{ byCategory: any[]; byPlatform: any[]; detailed: any[] }>(`/api/analytics/error-distribution?range=${range}`),
+    queryKey: ['analytics', 'error-distribution', range, gatewayApiKeyId],
+    queryFn: () => apiFetch<ErrorDistribution>(analyticsPath('error-distribution')),
   })
+
+  function gatewayKeyLabel(key: GatewayApiKey): string {
+    const name = key.label || key.keyPreview
+    if (key.isDeleted) return `${name} (Deleted)`
+    if (!key.enabled) return `${name} (Disabled)`
+    return name
+  }
+
+  function selectedGatewayKeyLabel(): string {
+    if (gatewayApiKeyId === 'all') return 'All gateways'
+    const selectedKey = gatewayKeys.find(key => String(key.id) === gatewayApiKeyId)
+    return selectedKey ? gatewayKeyLabel(selectedKey) : 'Gateway key'
+  }
 
   return (
     <div>
@@ -82,17 +135,34 @@ export default function AnalyticsPage() {
         title="Analytics"
         description="Request volume, latency, token usage, and failures."
         actions={
-          <div className="flex gap-1 rounded-md border p-0.5">
-            {(['24h', '7d', '30d'] as TimeRange[]).map(r => (
-              <Button
-                key={r}
-                variant={range === r ? 'secondary' : 'ghost'}
-                size="xs"
-                onClick={() => setRange(r)}
-              >
-                {r}
-              </Button>
-            ))}
+          <div className="flex flex-wrap items-center gap-2">
+            <Select value={gatewayApiKeyId} onValueChange={(value) => setGatewayApiKeyId(value ?? 'all')}>
+              <SelectTrigger className="w-[220px]">
+                <span data-slot="select-value" className="min-w-0 flex-1 text-left">
+                  {selectedGatewayKeyLabel()}
+                </span>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All gateways</SelectItem>
+                {gatewayKeys.map(key => (
+                  <SelectItem key={key.id} value={String(key.id)}>
+                    {gatewayKeyLabel(key)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <div className="flex gap-1 rounded-md border p-0.5">
+              {(['24h', '7d', '30d'] as TimeRange[]).map(r => (
+                <Button
+                  key={r}
+                  variant={range === r ? 'secondary' : 'ghost'}
+                  size="xs"
+                  onClick={() => setRange(r)}
+                >
+                  {r}
+                </Button>
+              ))}
+            </div>
           </div>
         }
       />
@@ -180,7 +250,7 @@ export default function AnalyticsPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {byModel.map((m: any, i: number) => (
+                      {byModel.map((m, i) => (
                         <TableRow key={i}>
                           <TableCell className="pl-4 text-sm font-medium">{m.displayName}</TableCell>
                           <TableCell className="text-xs text-muted-foreground">{m.platform}</TableCell>
@@ -228,7 +298,7 @@ export default function AnalyticsPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {errors.slice(0, 20).map((e: any) => (
+                    {errors.slice(0, 20).map((e) => (
                       <TableRow key={e.id}>
                         <TableCell className="pl-4 text-xs">{e.platform}</TableCell>
                         <TableCell className="text-xs max-w-[200px] truncate">{e.error}</TableCell>

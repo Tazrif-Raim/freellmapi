@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { initDb } from '../../db/index.js';
+import { getGatewayKeyPreview, hashGatewayApiKey } from '../../lib/gateway-keys.js';
 
 /**
  * All migrations must be idempotent: running initDb twice on the same
@@ -43,6 +44,48 @@ describe('Migration idempotency', () => {
 
     expect(after).toEqual(before);
     expect(after.orphanFallbacks).toBe(0);
+  });
+
+  it('V19 migrates a legacy unified key into hashed gateway key storage', () => {
+    process.env.ENCRYPTION_KEY = '0'.repeat(64);
+    const tmpPath = `/tmp/freeapi-gateway-migration-${Date.now()}.db`;
+    const legacyKey = `freellmapi-${'a'.repeat(48)}`;
+    const seed = new Database(tmpPath);
+    seed.exec(`
+      CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        platform TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        key_id INTEGER,
+        status TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        latency_ms INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO settings (key, value) VALUES ('unified_api_key', '${legacyKey}');
+    `);
+    seed.close();
+
+    const db = initDb(tmpPath);
+    const gateway = db.prepare('SELECT label, key_hash, key_preview FROM gateway_api_keys').get() as {
+      label: string;
+      key_hash: string;
+      key_preview: string;
+    };
+    const setting = db.prepare("SELECT value FROM settings WHERE key = 'unified_api_key'").get() as { value: string };
+    const requestColumns = db.prepare('PRAGMA table_info(requests)').all() as Array<{ name: string }>;
+    db.close();
+
+    expect(gateway).toEqual({
+      label: 'Default',
+      key_hash: hashGatewayApiKey(legacyKey),
+      key_preview: getGatewayKeyPreview(legacyKey),
+    });
+    expect(setting.value).toBe('migrated_to_gateway_api_keys');
+    expect(requestColumns.map(col => col.name)).toContain('gateway_api_key_id');
   });
 
   it('every catalog row has exactly one fallback_config entry', () => {

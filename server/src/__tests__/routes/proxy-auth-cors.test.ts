@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getUnifiedApiKey } from '../../db/index.js';
+import { initDb } from '../../db/index.js';
+import { createTestGatewayApiKey } from '../helpers/auth.js';
+
+let gatewayKey = '';
 
 async function request(app: Express, method: string, path: string, body?: any, headers: Record<string, string> = {}) {
   const server = app.listen(0);
@@ -30,9 +33,10 @@ describe('Proxy authentication and CORS', () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     initDb(':memory:');
     app = createApp();
+    gatewayKey = createTestGatewayApiKey();
   });
 
-  it('requires the unified API key for loopback chat completions', async () => {
+  it('requires a gateway API key for loopback chat completions', async () => {
     const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'hello' }],
     });
@@ -52,10 +56,10 @@ describe('Proxy authentication and CORS', () => {
     expect(body.error.type).toBe('authentication_error');
   });
 
-  it('accepts the unified key supplied via the x-api-key header', async () => {
+  it('accepts a gateway key supplied via the x-api-key header', async () => {
     const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'hello' }],
-    }, { 'x-api-key': getUnifiedApiKey() });
+    }, { 'x-api-key': gatewayKey });
 
     // Auth passes — it gets past the 401 gate. (Routing then fails because no
     // provider keys are configured in this test DB, which is fine: we only

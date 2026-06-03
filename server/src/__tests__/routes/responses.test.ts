@@ -10,7 +10,8 @@ vi.mock('../../services/router.js', async (importOriginal) => {
 
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getUnifiedApiKey } from '../../db/index.js';
+import { initDb } from '../../db/index.js';
+import { createTestGatewayApiKey } from '../helpers/auth.js';
 
 function fakeRoute(provider: any) {
   return { provider, modelId: 'fake-model', modelDbId: 9999, apiKey: 'k', keyId: 1, platform: 'fake', displayName: 'Fake Model' };
@@ -37,10 +38,10 @@ describe('POST /v1/responses (#96)', () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     initDb(':memory:');
     app = createApp();
-    key = getUnifiedApiKey();
+    key = createTestGatewayApiKey();
   });
 
-  it('rejects requests without a valid unified key (401)', async () => {
+  it('rejects requests without a valid gateway key (401)', async () => {
     expect((await post(app, '/v1/responses', { input: 'hi' })).status).toBe(401);
     expect((await post(app, '/v1/responses', { input: 'hi' }, 'wrong')).status).toBe(401);
   });
@@ -67,7 +68,13 @@ describe('POST /v1/responses (#96)', () => {
 
   // #103: the x-api-key header (Anthropic wire format) must authenticate here
   // too, not just on /v1/chat/completions.
-  it('accepts the unified key via the x-api-key header', async () => {
+  it('accepts the gateway key via the x-api-key header', async () => {
+    const routingError = new Error('No route available') as Error & { status?: number };
+    routingError.status = 503;
+    mockRouteRequest.mockImplementation(() => {
+      throw routingError;
+    });
+
     const server = app.listen(0);
     const addr = server.address() as any;
     const res = await fetch(`http://127.0.0.1:${addr.port}/v1/responses`, {

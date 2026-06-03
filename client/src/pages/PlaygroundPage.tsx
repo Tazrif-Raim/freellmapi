@@ -28,6 +28,13 @@ interface ChatMessage {
   }
 }
 
+interface ChatCompletionBody {
+  messages: { role: ChatMessage['role']; content: string }[]
+  model?: string
+}
+
+const PLAYGROUND_GATEWAY_KEY_STORAGE = 'freellmapi_playground_gateway_key'
+
 export default function PlaygroundPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
@@ -35,11 +42,6 @@ export default function PlaygroundPage() {
   const [selectedModel, setSelectedModel] = useState<string>('auto')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-
-  const { data: keyData } = useQuery<{ apiKey: string }>({
-    queryKey: ['unified-key'],
-    queryFn: () => apiFetch('/api/settings/api-key'),
-  })
 
   const { data: fallbackEntries = [] } = useQuery<FallbackEntry[]>({
     queryKey: ['fallback'],
@@ -65,9 +67,17 @@ export default function PlaygroundPage() {
 
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-      if (keyData?.apiKey) headers['Authorization'] = `Bearer ${keyData.apiKey}`
+      const gatewayApiKey = sessionStorage.getItem(PLAYGROUND_GATEWAY_KEY_STORAGE)
+      if (!gatewayApiKey) {
+        setMessages([...newMessages, {
+          role: 'assistant',
+          content: 'Error: Create or regenerate a gateway API key on the Keys page first. The raw key is only available immediately after that action.',
+        }])
+        return
+      }
+      headers.Authorization = `Bearer ${gatewayApiKey}`
 
-      const body: any = {
+      const body: ChatCompletionBody = {
         messages: newMessages.map(m => ({ role: m.role, content: m.content })),
       }
       if (selectedModel !== 'auto') body.model = selectedModel
@@ -110,10 +120,11 @@ export default function PlaygroundPage() {
           fallbackAttempts: fallbackAttempts ? parseInt(fallbackAttempts) : undefined,
         },
       }])
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error'
       setMessages([...newMessages, {
         role: 'assistant',
-        content: `Error: ${err.message}`,
+        content: `Error: ${message}`,
       }])
     } finally {
       setLoading(false)

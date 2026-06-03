@@ -23,9 +23,39 @@ function getSinceTimestamp(range: string): string {
   }
 }
 
+function parseGatewayApiKeyId(req: Request, res: Response): number | null | undefined {
+  const raw = req.query.gatewayApiKeyId;
+  if (raw === undefined || raw === '' || raw === 'all') return null;
+  if (Array.isArray(raw)) {
+    res.status(400).json({ error: { message: 'gatewayApiKeyId must be a single integer' } });
+    return undefined;
+  }
+
+  const id = Number.parseInt(raw as string, 10);
+  if (!Number.isInteger(id) || id <= 0 || String(id) !== raw) {
+    res.status(400).json({ error: { message: 'gatewayApiKeyId must be a positive integer' } });
+    return undefined;
+  }
+  return id;
+}
+
+function gatewayFilter(gatewayApiKeyId: number | null, alias = '') {
+  if (gatewayApiKeyId === null) return { sql: '', params: [] as number[] };
+
+  const column = `${alias}gateway_api_key_id`;
+  if (gatewayApiKeyId === 1) {
+    return { sql: ` AND (${column} = ? OR ${column} IS NULL)`, params: [gatewayApiKeyId] };
+  }
+
+  return { sql: ` AND ${column} = ?`, params: [gatewayApiKeyId] };
+}
+
 // Summary stats
 analyticsRouter.get('/summary', (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '7d';
+  const gatewayApiKeyId = parseGatewayApiKeyId(req, res);
+  if (gatewayApiKeyId === undefined) return;
+  const filter = gatewayFilter(gatewayApiKeyId);
   const since = getSinceTimestamp(range);
   const db = getDb();
 
@@ -37,8 +67,8 @@ analyticsRouter.get('/summary', (req: Request, res: Response) => {
       SUM(output_tokens) as total_output_tokens,
       AVG(latency_ms) as avg_latency_ms
     FROM requests
-    WHERE created_at >= ?
-  `).get(since) as any;
+    WHERE created_at >= ?${filter.sql}
+  `).get(since, ...filter.params) as any;
 
   const totalRequests = stats.total_requests ?? 0;
   const successRate = totalRequests > 0 ? (stats.success_count / totalRequests) * 100 : 0;
@@ -61,6 +91,9 @@ analyticsRouter.get('/summary', (req: Request, res: Response) => {
 // Stats grouped by model
 analyticsRouter.get('/by-model', (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '7d';
+  const gatewayApiKeyId = parseGatewayApiKeyId(req, res);
+  if (gatewayApiKeyId === undefined) return;
+  const filter = gatewayFilter(gatewayApiKeyId, 'r.');
   const since = getSinceTimestamp(range);
   const db = getDb();
 
@@ -76,10 +109,10 @@ analyticsRouter.get('/by-model', (req: Request, res: Response) => {
       SUM(r.output_tokens) as total_output_tokens
     FROM requests r
     LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
-    WHERE r.created_at >= ?
+    WHERE r.created_at >= ?${filter.sql}
     GROUP BY r.platform, r.model_id
     ORDER BY requests DESC
-  `).all(since) as any[];
+  `).all(since, ...filter.params) as any[];
 
   res.json(rows.map(r => ({
     platform: r.platform,
@@ -96,6 +129,9 @@ analyticsRouter.get('/by-model', (req: Request, res: Response) => {
 // Stats grouped by platform
 analyticsRouter.get('/by-platform', (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '7d';
+  const gatewayApiKeyId = parseGatewayApiKeyId(req, res);
+  if (gatewayApiKeyId === undefined) return;
+  const filter = gatewayFilter(gatewayApiKeyId);
   const since = getSinceTimestamp(range);
   const db = getDb();
 
@@ -108,10 +144,10 @@ analyticsRouter.get('/by-platform', (req: Request, res: Response) => {
       SUM(input_tokens) as total_input_tokens,
       SUM(output_tokens) as total_output_tokens
     FROM requests
-    WHERE created_at >= ?
+    WHERE created_at >= ?${filter.sql}
     GROUP BY platform
     ORDER BY requests DESC
-  `).all(since) as any[];
+  `).all(since, ...filter.params) as any[];
 
   res.json(rows.map(r => ({
     platform: r.platform,
@@ -127,6 +163,9 @@ analyticsRouter.get('/by-platform', (req: Request, res: Response) => {
 analyticsRouter.get('/timeline', (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '7d';
   const interval = (req.query.interval as string) ?? (range === '24h' ? 'hour' : 'day');
+  const gatewayApiKeyId = parseGatewayApiKeyId(req, res);
+  if (gatewayApiKeyId === undefined) return;
+  const filter = gatewayFilter(gatewayApiKeyId);
   const since = getSinceTimestamp(range);
   const db = getDb();
 
@@ -140,10 +179,10 @@ analyticsRouter.get('/timeline', (req: Request, res: Response) => {
       SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
       SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as failure_count
     FROM requests
-    WHERE created_at >= ?
+    WHERE created_at >= ?${filter.sql}
     GROUP BY strftime('${dateFormat}', created_at)
     ORDER BY timestamp ASC
-  `).all(since) as any[];
+  `).all(since, ...filter.params) as any[];
 
   res.json(rows.map(r => ({
     timestamp: r.timestamp,
@@ -156,6 +195,9 @@ analyticsRouter.get('/timeline', (req: Request, res: Response) => {
 // Error distribution (grouped by error type and platform)
 analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '7d';
+  const gatewayApiKeyId = parseGatewayApiKeyId(req, res);
+  if (gatewayApiKeyId === undefined) return;
+  const filter = gatewayFilter(gatewayApiKeyId);
   const since = getSinceTimestamp(range);
   const db = getDb();
 
@@ -176,10 +218,10 @@ analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
       END as error_category,
       COUNT(*) as count
     FROM requests
-    WHERE status = 'error' AND created_at >= ?
+    WHERE status = 'error' AND created_at >= ?${filter.sql}
     GROUP BY platform, error_category
     ORDER BY count DESC
-  `).all(since) as any[];
+  `).all(since, ...filter.params) as any[];
 
   // Also get totals by category
   const byCategory = db.prepare(`
@@ -196,19 +238,19 @@ analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
       END as category,
       COUNT(*) as count
     FROM requests
-    WHERE status = 'error' AND created_at >= ?
+    WHERE status = 'error' AND created_at >= ?${filter.sql}
     GROUP BY category
     ORDER BY count DESC
-  `).all(since) as any[];
+  `).all(since, ...filter.params) as any[];
 
   // Errors by platform
   const byPlatform = db.prepare(`
     SELECT platform, COUNT(*) as count
     FROM requests
-    WHERE status = 'error' AND created_at >= ?
+    WHERE status = 'error' AND created_at >= ?${filter.sql}
     GROUP BY platform
     ORDER BY count DESC
-  `).all(since) as any[];
+  `).all(since, ...filter.params) as any[];
 
   res.json({
     byCategory,
@@ -220,16 +262,19 @@ analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
 // Recent errors
 analyticsRouter.get('/errors', (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '7d';
+  const gatewayApiKeyId = parseGatewayApiKeyId(req, res);
+  if (gatewayApiKeyId === undefined) return;
+  const filter = gatewayFilter(gatewayApiKeyId);
   const since = getSinceTimestamp(range);
   const db = getDb();
 
   const rows = db.prepare(`
     SELECT id, platform, model_id, error, latency_ms, created_at
     FROM requests
-    WHERE status = 'error' AND created_at >= ?
+    WHERE status = 'error' AND created_at >= ?${filter.sql}
     ORDER BY created_at DESC
     LIMIT 50
-  `).all(since) as any[];
+  `).all(since, ...filter.params) as any[];
 
   res.json(rows.map(r => ({
     id: r.id,

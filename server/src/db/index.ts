@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { initEncryptionKey } from '../lib/crypto.js';
+import { getGatewayKeyPreview, hashGatewayApiKey } from '../lib/gateway-keys.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_PATH = path.resolve(__dirname, '../../data/freeapi.db');
@@ -56,7 +57,7 @@ export function initDb(dbPath?: string): Database.Database {
   migrateModelsV19Gemma4(db);
   migrateModelsV20KiloFree(db);
   migrateModelsV21PruneDead(db);
-  ensureUnifiedKey(db);
+  migrateModelsV22MultiGatewayApiKeys(db);
 
   console.log(`Database initialized at ${resolvedPath}`);
   return db;
@@ -1622,6 +1623,49 @@ function migrateModelsV21PruneDead(db: Database.Database) {
     `).run();
   });
   apply();
+}
+
+function migrateModelsV22MultiGatewayApiKeys(db: Database.Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gateway_api_keys (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      label TEXT NOT NULL DEFAULT '',
+      key_hash TEXT NOT NULL UNIQUE,
+      key_preview TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      is_deleted INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_used_at TEXT
+    );
+  `);
+
+  const requestColumns = db.prepare('PRAGMA table_info(requests)').all() as { name: string }[];
+  if (!requestColumns.some(col => col.name === 'gateway_api_key_id')) {
+    db.prepare('ALTER TABLE requests ADD COLUMN gateway_api_key_id INTEGER').run();
+  }
+  db.prepare('CREATE INDEX IF NOT EXISTS idx_requests_gateway_api_key_id ON requests(gateway_api_key_id)').run();
+
+  const count = db.prepare('SELECT COUNT(*) AS cnt FROM gateway_api_keys').get() as { cnt: number };
+  const retireLegacyUnifiedKey = () => {
+    db.prepare(`
+      UPDATE settings
+      SET value = 'migrated_to_gateway_api_keys'
+      WHERE key = 'unified_api_key' AND value LIKE 'freellmapi-%'
+    `).run();
+  };
+  if (count.cnt > 0) {
+    retireLegacyUnifiedKey();
+    return;
+  }
+
+  const legacy = db.prepare("SELECT value FROM settings WHERE key = 'unified_api_key'").get() as { value: string } | undefined;
+  if (!legacy?.value) return;
+
+  db.prepare(`
+    INSERT INTO gateway_api_keys (label, key_hash, key_preview, enabled)
+    VALUES ('Default', ?, ?, 1)
+  `).run(hashGatewayApiKey(legacy.value), getGatewayKeyPreview(legacy.value));
+  retireLegacyUnifiedKey();
 }
 
 /** Append any models not yet in the fallback chain, lowest priority, ordered by
